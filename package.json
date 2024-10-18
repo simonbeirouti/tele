@@ -1,0 +1,28 @@
+{
+  "name": "tele-bot",
+  "version": "1.0.0",
+  "main": "main.js",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "groq-sdk": "^0.7.0",
+    "langchain": "^0.3.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "nodemon": "^3.1.7",
+    "openai": "^4.68.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "telegraf": "^4.16.3"
+  },
+  "scripts": {
+    "start": "node main.js",
+    "dev": "nodemon main.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+  },
+  "type": "module",
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "jest": "^27.0.6"
+  }
+}
