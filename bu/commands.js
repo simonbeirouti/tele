@@ -1,7 +1,7 @@
 import { Composer } from 'telegraf';
 // import { generateWelcomeMessage } from './lib/aiWelcome.js';
-import { getInlineKeyboard } from './lib/getInlineKeyboard.js';
-import { getChatHistory, getChatHistoryBatch } from './database.js';
+import { getInlineKeyboard } from './getInlineKeyboard.js';
+import { getChatHistory, getChatHistoryBatch } from '../database.js';
 
 export function setupCommands(bot) {
 	const composer = new Composer();

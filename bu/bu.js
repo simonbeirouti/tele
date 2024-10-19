@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import { Telegraf, session } from 'telegraf';
-import { initializeDatabase } from './database.js';
+import { initializeDatabase } from '../database.js';
 import { setupCommands } from './commands.js';
 // import { setupMessageHandlers } from './messageHandlers.js';
 // import { createStage } from './lib/navigation.js';

@@ -1,5 +1,5 @@
 import { Scenes, Markup } from 'telegraf';
-import { getInlineKeyboard, getNavigationText, navigationMap } from './lib/getInlineKeyboard.js';
+import { getInlineKeyboard, getNavigationText, navigationMap } from './getInlineKeyboard.js';
 
 const mainMenuScene = new Scenes.BaseScene('mainMenu');
 mainMenuScene.enter(async (ctx) => {

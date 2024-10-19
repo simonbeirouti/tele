@@ -1,4 +1,4 @@
-import { saveChat } from './database.js';
+import { saveChat } from '../database.js';
 
 export function setupMessageHandlers(bot, showMessagesOnLoad) {
   bot.on('message', async (ctx) => {
