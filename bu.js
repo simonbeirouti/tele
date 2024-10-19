@@ -7,7 +7,7 @@ import { setupCommands } from './commands.js';
 import { generateWelcomeMessage } from './lib/aiWelcome.js';
 import { Groq } from 'groq-sdk';
 import { createAIAgent } from './aiAgent.js';
-import { getChannelConfig } from './channelConfig.js';
+
 
 dotenv.config();
 
@@ -17,7 +17,6 @@ const groq = new Groq(process.env.GROQ_API_KEY);
 async function startBot() {
   try {
     await initializeDatabase();
-    console.log('Database initialized');
 
     bot.use(session());
 
@@ -202,27 +201,6 @@ async function startBot() {
       }
     });
 
-    // Handler for /n8n command callback queries
-    bot.action('run_workflow', async (ctx) => {
-      await ctx.answerCbQuery();
-      await ctx.reply('Which workflow would you like to run?');
-      // Here you would typically provide a list of available workflows or ask for input
-    });
-
-    bot.action('check_status', async (ctx) => {
-      await ctx.answerCbQuery();
-      await ctx.reply('Checking n8n status...');
-      // Here you would implement the logic to check n8n status
-    });
-
-    bot.action('n8n_help', async (ctx) => {
-      await ctx.answerCbQuery();
-      await ctx.reply('n8n Help:\n\n' +
-        '- Run Workflow: Execute an n8n workflow\n' +
-        '- Check Status: View the current status of n8n\n' +
-        '- Help: Display this help message');
-    });
-
     // Modify the launch method to include error handling
     await bot.launch().then(() => {
       console.log('Bot is running...');
@@ -243,5 +221,6 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
 // Log the chat ID for each incoming message
 bot.on('message', (ctx) => {
   const chatId = ctx.chat.id;
-  console.log(`Bot is in chat with ID: ${chatId}`);
+  const title = ctx.chat.title;
+  console.log(`Bot is in ${title} with ID: ${chatId}`);
 });
