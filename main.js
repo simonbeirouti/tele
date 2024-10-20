@@ -45,7 +45,10 @@ async function processMessageQueue(chatId) {
       console.error('Failed to save user messages, cannot save AI response');
     }
 
-    await bot.telegram.sendMessage(chatId, assistantReplyText);
+    // Use the reply method with reply_to_message_id
+    await bot.telegram.sendMessage(chatId, assistantReplyText, {
+      reply_to_message_id: messages[messages.length - 1].message.id
+    });
   } catch (error) {
     console.error('Error processing message queue:', error);
     await bot.telegram.sendMessage(chatId, "I'm sorry, I encountered an error while processing your messages.");
