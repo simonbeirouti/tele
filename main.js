@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { Telegraf } from 'telegraf';
+import express from 'express';
 import { processMessages } from './aiService.js';
 import { saveMessages, saveAIResponse, getRecentMessages } from './database.js';
 import { setupCommands } from './commands.js';
@@ -7,6 +8,7 @@ import { setupCommands } from './commands.js';
 dotenv.config();
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+const app = express();
 
 setupCommands(bot);
 
@@ -115,7 +117,23 @@ async function startBot() {
       { command: 'history', description: 'Scan and save all chat messages' }
     ]);
 
-    await bot.launch();
+    // Use webhooks for production
+    if (process.env.NODE_ENV === 'production') {
+      const PORT = process.env.PORT || 3000;
+      app.use(await bot.createWebhook({ domain: process.env.WEBHOOK_URL }));
+      
+      app.get('/', (req, res) => {
+        res.send('Bot is running!');
+      });
+
+      app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+      });
+    } else {
+      // Use polling for development
+      await bot.launch();
+    }
+
     console.log('Bot is running...');
   } catch (error) {
     console.error('Error starting bot:', error);
