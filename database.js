@@ -63,56 +63,58 @@ async function addGroup(group) {
   }
 }
 
-async function saveMessage(chatId, userId, message, chatType, chatTitle, username, firstName, lastName) {
+async function saveMessages(messages) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    await addUser({ id: userId, username, firstName, lastName });
-    await addGroup({ id: chatId, type: chatType, title: chatTitle });
+    const savedMessageIds = [];
 
-    const result = await client.query(
-      'INSERT INTO messages (chat_group_id, user_id, text, sent_at) VALUES ($1, $2, $3, $4) RETURNING id',
-      [chatId, userId, message, new Date()]
-    );
-    const messageId = result.rows[0].id;
+    for (const message of messages) {
+      await addUser({ id: message.sender.id, username: message.sender.username, firstName: message.sender.firstName, lastName: message.sender.lastName });
+      await addGroup({ id: message.chat.id, type: message.chat.type, title: message.chat.title });
+
+      const result = await client.query(
+        'INSERT INTO messages (chat_group_id, user_id, text, sent_at) VALUES ($1, $2, $3, $4) RETURNING id',
+        [message.chat.id, message.sender.id, message.message.text, message.message.date]
+      );
+      const messageId = result.rows[0].id;
+      savedMessageIds.push(messageId);
+
+      await addToVectorStore(`Message sent in ${message.chat.title || message.chat.id} by ${message.sender.username || message.sender.id}: ${message.message.text}`, { type: 'message', messageId, chatId: message.chat.id, userId: message.sender.id });
+    }
 
     await client.query('COMMIT');
-    console.log(`Message added to database with ID: ${messageId}`);
+    console.log(`Messages added to database with IDs: ${savedMessageIds.join(', ')}`);
     
-    await addToVectorStore(`Message sent in ${chatTitle || chatId} by ${username || userId}: ${message}`, { type: 'message', messageId, chatId, userId });
-    
-    return messageId;
+    return savedMessageIds;
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('Error saving message:', error);
+    console.error('Error saving messages:', error);
     throw error;
   } finally {
     client.release();
   }
 }
 
-async function saveAIResponse(messageId, aiResponse, chatType, chatTitle, username, userId) {
+async function saveAIResponse(messageIds, aiResponse, chatType, chatTitle, username, userId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Determine group name
     let groupName = chatTitle;
     if (chatType === 'private') {
       groupName = `DM with ${username || userId}`;
     }
 
-    // Create a new chat interaction
     const createInteractionQuery = `
       INSERT INTO chat_interactions (initial_message_id)
       VALUES ($1)
       RETURNING id
     `;
-    const interactionResult = await client.query(createInteractionQuery, [messageId]);
+    const interactionResult = await client.query(createInteractionQuery, [messageIds[0]]);
     const interactionId = interactionResult.rows[0].id;
 
-    // Insert the AI response
     const insertResponseQuery = `
       INSERT INTO ai_responses (interaction_id, response_text)
       VALUES ($1, $2)
@@ -126,7 +128,7 @@ async function saveAIResponse(messageId, aiResponse, chatType, chatTitle, userna
     return {
       interaction_id: interactionId,
       response_id: responseId,
-      group_name: groupName // Return the group name
+      group_name: groupName
     };
   } catch (error) {
     await client.query('ROLLBACK');
@@ -201,7 +203,7 @@ export {
   initializeDatabase,
   addUser,
   addGroup,
-  saveMessage,
+  saveMessages,
   saveAIResponse,
   getRecentMessages,
   saveBulkMessages

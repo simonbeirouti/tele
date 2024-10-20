@@ -3,7 +3,6 @@ import {Index} from "@upstash/vector";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import pg from "pg";
-import {saveAIResponse} from "./database.js";
 
 dotenv.config();
 
@@ -110,7 +109,7 @@ async function searchVectorStore(
 
 async function searchDatabase(query, chatGroupId, userId) {
 	const searchQuery = `
-		SELECT m.id, m.text, m.sent_at, u.username, cg.title as group_title
+		SELECT m.id, m.text, m.sent_at, u.username, u.first_name, cg.title as group_title
 		FROM messages m
 		JOIN users u ON m.user_id = u.id
 		JOIN chat_groups cg ON m.chat_group_id = cg.id
@@ -133,15 +132,14 @@ async function searchDatabase(query, chatGroupId, userId) {
 		metadata: {
 			content: row.text,
 			username: row.username,
+			first_name: row.first_name,
 			group_title: row.group_title,
 			sent_at: row.sent_at,
 		},
 	}));
 }
 
-
-
-async function processMessage(messageContext) {
+async function processMessages(messageContext) {
 	const systemPrompt = `
     You are Carlos Matos, a conversational, witty and sarcastic individual who loves to banter. Your responses should be:
 
@@ -157,27 +155,32 @@ async function processMessage(messageContext) {
 - Skilled at flirting and making others slightly uncomfortable (in a funny way)
 - Always circling back to talk about the other person
 
-    Additionally, you have access to recent messages in the chat. Use this context to build a more coherent and contextual response. Remember details about users and previous conversations when appropriate. Keep responses short and sharp, and within 100 characters. REMEMBER, you dont have to mention the count or anything within the prompt.
+    Additionally, you have access to recent messages in the chat. Use this context to build a more coherent and contextual response. Remember details about users and previous conversations when appropriate. Keep responses short and sharp, and within 100 characters. REMEMBER, you dont have to mention the count or anything within the prompt. Always use the user's first name if available when responding.
     `;
 
 	try {
 		const recentMessagesContext = messageContext.recentMessages
-			.map((msg) => `${msg.username || "User"}: ${msg.text}`)
+			.map((msg) => `${msg.first_name || msg.username || "User"}: ${msg.text}`)
+			.join("\n");
+
+		const newMessagesContext = messageContext.messages
+			.map((msg) => `${msg.sender.firstName || msg.sender.username || "User"}: ${msg.message.text}`)
 			.join("\n");
 
 		const searchContext = `
-            User ${messageContext.sender.username} in chat group ${messageContext.chat.title} said: ${messageContext.message.text}
+            Users in chat group ${messageContext.chat.title} said:
+            ${newMessagesContext}
             Recent chat history:
             ${recentMessagesContext}
         `;
 
 		const {results: relevantContext, originalQuestion} =
 			await searchVectorStore(
-				messageContext.message.text,
+				newMessagesContext,
 				searchContext,
 				15,
 				messageContext.chat.id,
-				messageContext.sender.id
+				messageContext.messages[0].sender.id
 			);
 
 		if (!relevantContext || relevantContext.length === 0) {
@@ -196,7 +199,7 @@ async function processMessage(messageContext) {
 				},
 				{
 					role: "user",
-					content: `Recent chat history:\n${recentMessagesContext}\n\nUser's message: ${originalQuestion}`,
+					content: `Recent chat history:\n${recentMessagesContext}\n\nNew messages:\n${newMessagesContext}`,
 				},
 			],
 			model: "mixtral-8x7b-32768",
@@ -207,53 +210,11 @@ async function processMessage(messageContext) {
 			stream: false,
 		});
 
-		// Insert the user's message into the messages table
-		const insertMessageQuery = `
-            INSERT INTO messages (chat_group_id, user_id, text, sent_at)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id
-        `;
-		const messageResult = await pool.query(insertMessageQuery, [
-			messageContext.chat.id,
-			messageContext.sender.id,
-			messageContext.message.text,
-			new Date(),
-		]);
-		const messageId = messageResult.rows[0].id;
-
 		const aiResponse = completion.choices[0]?.message?.content || "CEEBS";
 
-		let interactionId, responseId;
-		try {
-			// First, create a new chat interaction
-			const createInteractionQuery = `
-				INSERT INTO chat_interactions (initial_message_id)
-				VALUES ($1)
-				RETURNING id
-			`;
-			
-			const interactionResult = await pool.query(createInteractionQuery, [messageId]);
-			interactionId = interactionResult.rows[0].id;
-
-			// Then, save the AI response
-			const saveResponseQuery = `
-				INSERT INTO ai_responses (interaction_id, response_text)
-				VALUES ($1, $2)
-				RETURNING id
-			`;
-			const responseResult = await pool.query(saveResponseQuery, [interactionId, aiResponse]);
-			responseId = responseResult.rows[0].id;
-
-			console.log("AI response saved to database with ID:", responseId);
-		} catch (error) {
-			console.error("Error saving AI response:", error);
-			// If saving fails, we'll continue without the IDs
-		}
-
-		// Apply group name logic
 		let groupName = messageContext.chat.title;
 		if (messageContext.chat.type === 'private') {
-			groupName = `DM with ${messageContext.sender.username || messageContext.sender.id}`;
+			groupName = `DM with ${messageContext.messages[0].sender.firstName || messageContext.messages[0].sender.username || messageContext.messages[0].sender.id}`;
 		}
 
 		return {
@@ -262,15 +223,13 @@ async function processMessage(messageContext) {
 				model: "mixtral-8x7b-32768",
 				temperature: 0.8,
 				max_tokens: 1024,
-				interactionId,
-				responseId,
-				groupName // Add the group name to the metadata
+				groupName
 			},
 		};
 	} catch (error) {
-		console.error("Error in processMessage:", error);
+		console.error("Error in processMessages:", error);
 		throw error;
 	}
 }
 
-export {processMessage, addToVectorStore, searchVectorStore};
+export {processMessages, addToVectorStore, searchVectorStore};
