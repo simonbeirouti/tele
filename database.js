@@ -1,6 +1,6 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
-import { RAGChat, groq } from "@upstash/rag-chat";
+import { addToVectorStore } from './aiService.js';
 
 dotenv.config();
 
@@ -12,11 +12,6 @@ const pool = new Pool({
   database: process.env.POSTGRES_DB,
   user: process.env.POSTGRES_USER,
   password: process.env.POSTGRES_PASSWORD,
-});
-
-// Initialize RAGChat with the Groq model
-export const ragChat = new RAGChat({
-  model: groq("llama-3.1-70b-versatile", { apiKey: process.env.GROQ_AI_KEY }),
 });
 
 async function initializeDatabase() {
@@ -42,8 +37,7 @@ async function addUser(user) {
       [user.id, user.username, user.firstName, user.lastName]
     );
     
-    // Add context to RAGChat
-    await ragChat.context.add(`User ${user.username || user.id} joined with ID: ${user.id}`);
+    await addToVectorStore(`User ${user.username || user.id} joined with ID: ${user.id}`, { type: 'user_join', userId: user.id });
   } catch (error) {
     console.error('Error adding/updating user:', error);
     throw error;
@@ -60,8 +54,7 @@ async function addGroup(group) {
       [group.id, group.type, group.title]
     );
     
-    // Add context to RAGChat
-    await ragChat.context.add(`Group "${group.title}" (${group.type}) added with ID: ${group.id}`);
+    await addToVectorStore(`Group ${group.title || group.id} added with ID: ${group.id}`, { type: 'group_add', groupId: group.id });
   } catch (error) {
     console.error('Error adding/updating group:', error);
     throw error;
@@ -87,8 +80,7 @@ async function saveMessage(chatId, userId, message, chatType, chatTitle, usernam
     await client.query('COMMIT');
     console.log(`Message added to database with ID: ${messageId}`);
     
-    // Add context to RAGChat
-    await ragChat.context.add(`User ${username || userId} sent message in ${chatTitle}: "${message}"`);
+    await addToVectorStore(`Message sent in ${chatTitle || chatId} by ${username || userId}: ${message}`, { type: 'message', messageId, chatId, userId });
     
     return messageId;
   } catch (error) {
@@ -100,22 +92,105 @@ async function saveMessage(chatId, userId, message, chatType, chatTitle, usernam
   }
 }
 
-async function saveAIResponse(messageId, responseText) {
+async function saveAIResponse(messageId, aiResponse, chatType, chatTitle, username, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Determine group name
+    let groupName = chatTitle;
+    if (chatType === 'private') {
+      groupName = `DM with ${username || userId}`;
+    }
+
+    // Create a new chat interaction
+    const createInteractionQuery = `
+      INSERT INTO chat_interactions (initial_message_id)
+      VALUES ($1)
+      RETURNING id
+    `;
+    const interactionResult = await client.query(createInteractionQuery, [messageId]);
+    const interactionId = interactionResult.rows[0].id;
+
+    // Insert the AI response
+    const insertResponseQuery = `
+      INSERT INTO ai_responses (interaction_id, response_text)
+      VALUES ($1, $2)
+      RETURNING id
+    `;
+    const responseResult = await client.query(insertResponseQuery, [interactionId, aiResponse]);
+    const responseId = responseResult.rows[0].id;
+
+    await client.query('COMMIT');
+
+    return {
+      interaction_id: interactionId,
+      response_id: responseId,
+      group_name: groupName // Return the group name
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error saving AI response:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function getRecentMessages(chatId, limit) {
   const client = await pool.connect();
   try {
     const result = await client.query(
-      'INSERT INTO ai_responses (message_id, response_text) VALUES ($1, $2) RETURNING id',
-      [messageId, responseText]
+      `SELECT m.id, m.text, m.sent_at, u.username, u.first_name, u.last_name
+       FROM messages m
+       JOIN users u ON m.user_id = u.id
+       WHERE m.chat_group_id = $1
+       ORDER BY m.sent_at DESC
+       LIMIT $2`,
+      [chatId, limit]
     );
-    const responseId = result.rows[0].id;
-    console.log(`AI response saved to database with ID: ${responseId}`);
-    
-    // Add context to RAGChat
-    await ragChat.context.add(`AI responded to message ${messageId}: "${responseText}"`);
-    
-    return responseId;
+    return result.rows;
   } catch (error) {
-    console.error('Error saving AI response:', error);
+    console.error('Error fetching recent messages:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function saveBulkMessages(messages) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    for (const message of messages) {
+      // First, add or update the user
+      await client.query(
+        'INSERT INTO users (id, username, first_name, last_name) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET username = COALESCE(EXCLUDED.username, users.username), first_name = COALESCE(EXCLUDED.first_name, users.first_name), last_name = COALESCE(EXCLUDED.last_name, users.last_name)',
+        [message.user_id, message.username, message.first_name, message.last_name]
+      );
+
+      // Then, insert the message
+      const result = await client.query(
+        'INSERT INTO messages (id, chat_group_id, user_id, text, sent_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING RETURNING id',
+        [message.id, message.chat_id, message.user_id, message.text, message.sent_at]
+      );
+
+      // If the message was inserted (not ignored due to conflict), add it to the vector store
+      if (result.rows.length > 0) {
+        const messageId = result.rows[0].id;
+        await addToVectorStore(
+          `Message sent in ${message.chat_id} by ${message.username || message.user_id}: ${message.text}`,
+          { type: 'message', messageId, chatId: message.chat_id, userId: message.user_id }
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    console.log(`Bulk messages saved to database: ${messages.length}`);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error saving bulk messages:', error);
     throw error;
   } finally {
     client.release();
@@ -127,5 +202,7 @@ export {
   addUser,
   addGroup,
   saveMessage,
-  saveAIResponse
+  saveAIResponse,
+  getRecentMessages,
+  saveBulkMessages
 };

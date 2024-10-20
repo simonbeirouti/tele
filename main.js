@@ -1,11 +1,14 @@
 import dotenv from 'dotenv';
 import { Telegraf } from 'telegraf';
 import { processMessage } from './aiService.js';
-import { saveMessage, saveAIResponse } from './database.js';
+import { saveMessage, saveAIResponse, getRecentMessages } from './database.js';
+import { setupCommands } from './commands.js';
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+
+setupCommands(bot);
 
 async function startBot() {
   try {
@@ -30,6 +33,12 @@ async function startBot() {
       };
 
       try {
+        // Get recent messages for context
+        const recentMessages = await getRecentMessages(messageContext.chat.id, 20);
+        
+        // Add recent messages to the context
+        messageContext.recentMessages = recentMessages;
+
         // Save the user message to the database
         const savedMessageId = await saveMessage(
           messageContext.chat.id,
@@ -49,7 +58,8 @@ async function startBot() {
         
         // Save the AI response to the database
         if (savedMessageId) {
-          await saveAIResponse(savedMessageId, assistantReplyText);
+          const { interaction_id, response_id } = await saveAIResponse(savedMessageId, assistantReplyText);
+          // You can now use interaction_id and response_id if needed
         } else {
           console.error('Failed to save user message, cannot save AI response');
         }
@@ -65,6 +75,12 @@ async function startBot() {
     // Use the handler for text messages only
     bot.on('text', handleMessage);
 
+    // Load commands
+    await bot.telegram.setMyCommands([
+      { command: 'start', description: 'Get update on things' },
+      { command: 'history', description: 'Scan and save all chat messages' }
+    ]);
+
     await bot.launch().then(() => {
       console.log('Bot is running...');
     }).catch((error) => {
@@ -77,12 +93,6 @@ async function startBot() {
 
 startBot();
 
+// Enable graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-// Log the chat ID for each incoming message
-bot.on('message', (ctx) => {
-  const chatId = ctx.chat.id;
-  const title = ctx.chat.title;
-  console.log(`Bot is in ${title} with ID: ${chatId}`);
-});
-

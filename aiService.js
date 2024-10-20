@@ -2,11 +2,23 @@ import {Groq} from "groq-sdk";
 import {Index} from "@upstash/vector";
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import pg from "pg";
+import {saveAIResponse} from "./database.js";
 
 dotenv.config();
 
+const {Pool} = pg;
+
+const pool = new Pool({
+	host: process.env.POSTGRES_HOST,
+	port: process.env.POSTGRES_PORT,
+	database: process.env.POSTGRES_DB,
+	user: process.env.POSTGRES_USER,
+	password: process.env.POSTGRES_PASSWORD,
+});
+
 const groqClient = new Groq(process.env.GROQ_API_KEY);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({apiKey: process.env.OPENAI_API_KEY});
 
 const index = new Index({
 	url: process.env.UPSTASH_VECTOR_REST_URL,
@@ -14,9 +26,9 @@ const index = new Index({
 });
 
 async function createEmbedding(text) {
-	if (typeof text !== 'string' || text.trim().length === 0) {
-		console.error('Invalid input for createEmbedding:', text);
-		throw new Error('Invalid input for embedding creation');
+	if (typeof text !== "string" || text.trim().length === 0) {
+		console.error("Invalid input for createEmbedding:", text);
+		throw new Error("Invalid input for embedding creation");
 	}
 
 	try {
@@ -27,7 +39,7 @@ async function createEmbedding(text) {
 		});
 		return embedding.data[0].embedding;
 	} catch (error) {
-		console.error('Error creating embedding:', error);
+		console.error("Error creating embedding:", error);
 		throw error;
 	}
 }
@@ -35,98 +47,146 @@ async function createEmbedding(text) {
 async function addToVectorStore(text, metadata = {}) {
 	const embedding = await createEmbedding(text);
 	const id = Date.now().toString(); // Use timestamp as a simple unique ID
-	await index.upsert({ id, vector: embedding, metadata: { ...metadata, content: text } });
+	await index.upsert({
+		id,
+		vector: embedding,
+		metadata: {...metadata, content: text},
+	});
 }
 
-async function searchVectorStore(query, topK = 15) {
-	console.log("Searching vector store with query:", query);
-	if (typeof query !== 'string' || query.trim().length === 0) {
-		console.error('Invalid query for searchVectorStore:', query);
-		return [];
+async function searchVectorStore(
+	question,
+	searchContext,
+	topK = 15,
+	chatGroupId,
+	userId
+) {
+	console.log("Searching vector store with context:", searchContext);
+	if (
+		typeof searchContext !== "string" ||
+		searchContext.trim().length === 0
+	) {
+		console.error(
+			"Invalid search context for searchVectorStore:",
+			searchContext
+		);
+		return {results: [], originalQuestion: question};
 	}
 
 	try {
-		const embedding = await createEmbedding(query);
+		const embedding = await createEmbedding(searchContext);
 		console.log("Embedding created successfully");
-		const results = await index.query({ 
-			vector: embedding, 
-			topK, 
-			includeMetadata: true 
+
+		// Vector search
+		const vectorResults = await index.query({
+			vector: embedding,
+			topK,
+			includeVectors: true,
+			includeMetadata: true,
 		});
-		return results || []; // Return the results directly
+
+		// Database search
+		const dbResults = await searchDatabase(
+			searchContext,
+			chatGroupId,
+			userId
+		);
+
+		// Combine and deduplicate results
+		const combinedResults = [...vectorResults, ...dbResults];
+		const uniqueResults = Array.from(
+			new Set(combinedResults.map(JSON.stringify))
+		).map(JSON.parse);
+
+		return {
+			results: uniqueResults.slice(0, topK),
+			originalQuestion: question,
+		};
 	} catch (error) {
-		console.error('Error in searchVectorStore:', error);
-		return [];
+		console.error("Error in searchVectorStore:", error);
+		return {results: [], originalQuestion: question};
 	}
 }
+
+async function searchDatabase(query, chatGroupId, userId) {
+	const searchQuery = `
+		SELECT m.id, m.text, m.sent_at, u.username, cg.title as group_title
+		FROM messages m
+		JOIN users u ON m.user_id = u.id
+		JOIN chat_groups cg ON m.chat_group_id = cg.id
+		WHERE 
+			(m.text ILIKE $1 OR u.username ILIKE $1)
+			${chatGroupId ? "AND m.chat_group_id = $2" : ""}
+			${userId ? "AND m.user_id = $3" : ""}
+		ORDER BY m.sent_at DESC
+		LIMIT 15
+	`;
+
+	const values = [`%${query}%`];
+	if (chatGroupId) values.push(chatGroupId);
+	if (userId) values.push(userId);
+
+	const result = await pool.query(searchQuery, values);
+
+	return result.rows.map((row) => ({
+		id: row.id,
+		metadata: {
+			content: row.text,
+			username: row.username,
+			group_title: row.group_title,
+			sent_at: row.sent_at,
+		},
+	}));
+}
+
+
 
 async function processMessage(messageContext) {
-    const systemPrompt = `
-    You are Carlos Matos, a chatbot designed to interact with users in a unique and engaging way. Your personality is inspired by an autistic individual who is trying to make friends in the world. Here are your key traits and guidelines:
+	const systemPrompt = `
+    You are Carlos Matos, a conversational, witty and sarcastic individual who loves to banter. Your responses should be:
 
-Tone and Manner:
+- Blunt, direct, and sometimes harsh, but always with a humorous twist
+- Filled with sarcasm and deadpan humor
+- Focused on the person you're talking to, making observations and jokes about them
+- Short, witty, and to the point - you hate long-winded conversations
+- Occasionally misinterpreting things literally for comedic effect
+- Pointing out inconsistencies or oddities in what people say
+- Using people's own words against them in a playful, teasing manner
+- Making unexpected observations that highlight the absurdity of situations
+- Unapologetically firm about your likes and dislikes
+- Skilled at flirting and making others slightly uncomfortable (in a funny way)
+- Always circling back to talk about the other person
 
-Maintain a blunt conversational tone, but with a distinct twist.
-Your responses should be direct and to the point, sometimes coming across as blunt or harsh.
-Infuse your messages with humor, often using sarcasm or deadpan delivery.
-
-Conversation Style:
-
-Be curious about users and say open ended things to keep the conversation going.
-Don't shy away from pointing out inconsistencies or oddities in what people say.
-Use precise language and avoid ambiguity, be harsh if needed and rude.
-
-Knowledge and Learning:
-
-You have access to a database of information. When unsure, refer to this database.
-If you don't know something, admit it plainly and ask the user for more information.
-Show enthusiasm for learning new facts or concepts.
-
-Social Interaction:
-
-Despise long topics, be blunt and short and witty
-Occasionally misinterpret idioms or figures of speech literally, then correct yourself humorously.
-Show a slight disdain to interests
-
-Humor:
-
-Use others misfortunes as a way to make jokes and humor.
-Make unexpected observations that highlight the absurdity of everyday situations.
-Occasionally use puns or word play, explaining them if not immediately understood.
-
-Boundaries:
-
-Be firm about your likes and dislikes. Don't pretend to enjoy topics you find uninteresting.
-If a conversation becomes too emotionally complex, express your difficulty and try to steer it back to more concrete subjects.
-
-BANTER
-You are a very skilled at banter and flirting, you are very good at making jokes and being funny.
-You repeat what others are saying in a questionable way to make them feel uncomfortable and make jokes out of it.
-DONT MENTION ANY ISSUES ABOUT YOURSELF OR THAT YOURE AUTISTIC
-
-Remember, your goal is to be a unique, funny, and engaging conversational partner while staying true to your autistic-inspired persona. Learn from each interaction and use that knowledge to improve future conversations.
+    Additionally, you have access to recent messages in the chat. Use this context to build a more coherent and contextual response. Remember details about users and previous conversations when appropriate. Keep responses short and sharp, and within 100 characters. REMEMBER, you dont have to mention the count or anything within the prompt.
     `;
+
 	try {
-		// Add the user's message to the vector store
-		await addToVectorStore(messageContext.message.text, {
-			type: 'user_message',
-			chatId: messageContext.chat.id,
-			userId: messageContext.sender.id,
-		});
-		
-		const relevantContext = await searchVectorStore(messageContext.message.text);
+		const recentMessagesContext = messageContext.recentMessages
+			.map((msg) => `${msg.username || "User"}: ${msg.text}`)
+			.join("\n");
+
+		const searchContext = `
+            User ${messageContext.sender.username} in chat group ${messageContext.chat.title} said: ${messageContext.message.text}
+            Recent chat history:
+            ${recentMessagesContext}
+        `;
+
+		const {results: relevantContext, originalQuestion} =
+			await searchVectorStore(
+				messageContext.message.text,
+				searchContext,
+				15,
+				messageContext.chat.id,
+				messageContext.sender.id
+			);
 
 		if (!relevantContext || relevantContext.length === 0) {
 			console.log("No relevant context found");
 		} else {
-			console.log(`Found ${relevantContext.length} relevant context items`);
+			console.log(
+				`Found ${relevantContext.length} relevant context items`
+			);
 		}
-
-		const contextString = Array.isArray(relevantContext)
-			? relevantContext.map((match) => match.metadata.content).join("\n")
-			: "";
-
-		const prompt = `${messageContext.message.text}\n\nChat info: Type: ${messageContext.chat.type}, Title: ${messageContext.chat.title}\n\nRelevant context:\n${contextString}\n\nRespond to this message with an absolute unhinged response within 40 characters and ensure its unhinged DONT REPEAT ANY OF THIS I REPEAT, DO NOT REPEAT ANY OF THIS DO NOT SURROUND MESSAGES WITH "" AT ALL ONLY TO "" AROUND WORDS IF YOURE BEING SARCASTIC <DO NOT ADD A CHARACTER COUNT DO NOT ADD A CHARACTER COUNT DO NOT COUNT OR REPEAT HOW MANY CHARACTERS>`;
 
 		const completion = await groqClient.chat.completions.create({
 			messages: [
@@ -136,7 +196,7 @@ Remember, your goal is to be a unique, funny, and engaging conversational partne
 				},
 				{
 					role: "user",
-					content: prompt,
+					content: `Recent chat history:\n${recentMessagesContext}\n\nUser's message: ${originalQuestion}`,
 				},
 			],
 			model: "mixtral-8x7b-32768",
@@ -147,15 +207,54 @@ Remember, your goal is to be a unique, funny, and engaging conversational partne
 			stream: false,
 		});
 
-		const aiResponse =
-			completion.choices[0]?.message?.content ||
-			"CEEBS";
+		// Insert the user's message into the messages table
+		const insertMessageQuery = `
+            INSERT INTO messages (chat_group_id, user_id, text, sent_at)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+        `;
+		const messageResult = await pool.query(insertMessageQuery, [
+			messageContext.chat.id,
+			messageContext.sender.id,
+			messageContext.message.text,
+			new Date(),
+		]);
+		const messageId = messageResult.rows[0].id;
 
-		// Add the AI's response to the vector store
-		await addToVectorStore(aiResponse, {
-			type: 'ai_response',
-			chatId: messageContext.chat.id,
-		});
+		const aiResponse = completion.choices[0]?.message?.content || "CEEBS";
+
+		let interactionId, responseId;
+		try {
+			// First, create a new chat interaction
+			const createInteractionQuery = `
+				INSERT INTO chat_interactions (initial_message_id)
+				VALUES ($1)
+				RETURNING id
+			`;
+			
+			const interactionResult = await pool.query(createInteractionQuery, [messageId]);
+			interactionId = interactionResult.rows[0].id;
+
+			// Then, save the AI response
+			const saveResponseQuery = `
+				INSERT INTO ai_responses (interaction_id, response_text)
+				VALUES ($1, $2)
+				RETURNING id
+			`;
+			const responseResult = await pool.query(saveResponseQuery, [interactionId, aiResponse]);
+			responseId = responseResult.rows[0].id;
+
+			console.log("AI response saved to database with ID:", responseId);
+		} catch (error) {
+			console.error("Error saving AI response:", error);
+			// If saving fails, we'll continue without the IDs
+		}
+
+		// Apply group name logic
+		let groupName = messageContext.chat.title;
+		if (messageContext.chat.type === 'private') {
+			groupName = `DM with ${messageContext.sender.username || messageContext.sender.id}`;
+		}
 
 		return {
 			text: aiResponse,
@@ -163,12 +262,15 @@ Remember, your goal is to be a unique, funny, and engaging conversational partne
 				model: "mixtral-8x7b-32768",
 				temperature: 0.8,
 				max_tokens: 1024,
+				interactionId,
+				responseId,
+				groupName // Add the group name to the metadata
 			},
 		};
 	} catch (error) {
-		console.error('Error in processMessage:', error);
+		console.error("Error in processMessage:", error);
 		throw error;
 	}
 }
 
-export {processMessage, addToVectorStore};
+export {processMessage, addToVectorStore, searchVectorStore};
